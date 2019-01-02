@@ -4,53 +4,35 @@ import aioredis
 
 from streamengine import App
 
-app = App("test")
+app = App("ExampleApp")
 
 
-@app.agent("test", concurrency=5)
+@app.agent("redis_stream", concurrency=5)
 async def f(x):
-    if b'timer' in x[0][2].keys():
-        start = float(x[0][2][b'start'])
-        end = time.time()
-        print(f"f job took {(end - start)*1000} ms")
-
-    if b'theend' in x[0][2].keys():
-        #end = float(x[0][2][b'theend'])
-        end = time.time()
-        start = app.config["start"]
-        print(f"f mass job took {(end - start)*1000} ms")
+    # print received stream result
+    print(x)
 
 
 @app.timer(1)
 async def add():
+    # timer function sends an item to the redis stream 'redis_stream' every second
     t = str(time.time())
-    fields = {'start': t.encode('utf-8'), 'timer': 'YES'.encode('utf-8')}
-    await app.send_once("test", fields)
+    fields = {'time': t.encode('utf-8'), 'price': random.randint(10, 100)}
+    await app.send_once("redis_stream", fields)
 
 
 @app.on_start()
-async def send_mass_messages(loop):
-    RECORDS = 10000
-    start = time.time()
+async def send_many_messages():
+    # send many items at once, also to the stream 'redis_stream'
+    RECORDS = 1000
     redis = await app.create_sender()
     pipe = redis.pipeline()
     for x in range(RECORDS):
         t = str(time.time())
-        fields = {'start': t.encode('utf-8')}
-        pipe.xadd("test", fields)
+        fields = {'time': t.encode('utf-8'), 'price': random.randint(10,100)}
+        pipe.xadd("redis_stream", fields)
     await pipe.execute()
-    
-
-    #theend; send last message and mark it as such
-    t = str(time.time())
-    fields = {'start': t.encode('utf-8'), 'theend': "YES"}
-    await redis.xadd("test", fields)
-
-    end = time.time()
-    print(f"mass insert took {(end - start)*1000} ms")
 
 
 if __name__ == "__main__":
     app.main()
-
-    

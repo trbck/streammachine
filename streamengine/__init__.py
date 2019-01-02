@@ -39,8 +39,7 @@ class App(object):
 
     async def agent_consumer_container(self, wrapped_func, agent_config, loop):
         """
-        agent consumer container to listen to redis streams and call decorated function with received information.
-
+        Agent consumer container for listening to redis streams and subsequently call wrapped function with received information.
 
         """
         redis = await aioredis.create_redis(
@@ -62,17 +61,18 @@ class App(object):
 
     async def timer_container(self, wrapped_func, config):
         """
-        agent consumer container to listen to redis streams and call decorated function with received information
+        Timer consumer container for listening to redis streams and subsequently call wrapped function with received information
 
         """
         while True:
             await asyncio.sleep(config["value"])
             result = await wrapped_func()
 
-    async def on_start_container(self, wrapped_func, loop):
-        await wrapped_func(loop)
+    async def on_start_container(self, wrapped_func):
+        await wrapped_func()
 
     async def initiate_tasks(self):
+        # TODO needs a clean and efficient approach!
         task_list = []
 
         for item in self.registry.registered:
@@ -104,12 +104,12 @@ class App(object):
 
             if item[0] == "on_start":
                 # do this first!
-                await self.on_start_container(item[1], self.loop)
+                await self.on_start_container(item[1])
 
-        #put exactly the time the other jobs should start
+        #add the time the other jobs (agents) should start, for later monitoring etc.
         self.config["start"] = time.time()
 
-        #gather all the tasks and wait forever
+        #get all the prepared tasks (agents, timer, on_start)
         await asyncio.gather(*task_list)
 
     """
@@ -119,6 +119,8 @@ class App(object):
     async def send_once(self, stream, value):
         """
         TODO improve performance if possible
+
+        This is a one time stream sending function.
         """
         redis = await aioredis.create_redis(
             'redis://localhost:6380', loop=self.loop)
@@ -128,6 +130,8 @@ class App(object):
     async def create_sender(self, minsize=10, maxsize=20):
         """
         TODO improve performance if possible
+
+        This returns a redis pool object to be returned to an timer or agent function. 
         """
         return await aioredis.create_redis_pool(
             'redis://localhost:6380',
@@ -136,7 +140,7 @@ class App(object):
             loop=self.loop)
 
     """
-    below are the decorator classes (app.agent, app.timer, app.on_start, ...) used in the script and scanned by venusian lib
+    Decorator classes (app.agent, app.timer, app.on_start, ...) - used in the script and scanned by venusian lib.
     """
 
     class agent(object):
@@ -156,9 +160,6 @@ class App(object):
             }
 
         def __call__(self, wrapped):
-            """
-            sdfsdf.
-            """
             me = self
 
             class Wrapper(object):
