@@ -11,14 +11,12 @@ async def f(x):
     # print received stream result
     print(x)
 
-
 @app.timer(1)
 async def add():
     # timer function sends an item to the redis stream 'redis_stream' every second
     t = str(time.time())
     fields = {'time': t.encode('utf-8'), 'price': random.randint(10, 100)}
     await app.send_once("redis_stream", fields)
-
 
 @app.on_start()
 async def send_many_messages():
@@ -31,7 +29,6 @@ async def send_many_messages():
         fields = {'time': t.encode('utf-8'), 'price': random.randint(10,100)}
         pipe.xadd("redis_stream", fields)
     await pipe.execute()
-
 
 
 if __name__ == "__main__":
