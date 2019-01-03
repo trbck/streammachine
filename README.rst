@@ -1,4 +1,3 @@
-# streamengine
 
 ===========================================
 Python Stream Processing With Redis Streams
@@ -6,11 +5,13 @@ Python Stream Processing With Redis Streams
 
 Check: https://redis.io/topics/streams-intro
 
-|license|
 
 :Version: 0.1
-
 :Keywords: stream, async, processing, data, queue, redis
+
+**streamengine** aims to be a redis stream processing engine on top of asyncio, aioredis and separating decorator logic for simplicity.
+This project is heavily inspired by https://github.com/robinhood/faust but in a very early stage - support and suggestions a very welcome!
+
 
 .. sourcecode:: python
 
@@ -37,6 +38,13 @@ Check: https://redis.io/topics/streams-intro
         await app.send_once("redis_stream", fields)
 
 
-
     if __name__ == "__main__":
         app.main()
+
+
+Installation
+============
+.. sourcecode:: python
+    python setup.py install
+
+
