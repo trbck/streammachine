@@ -1,38 +1,34 @@
 # streamengine
 
-===========================================
 Python Stream Processing With Redis Streams
-===========================================
+
+https://redis.io/topics/streams-intro
 
 |license|
 
 :Version: 0.1
 :Keywords: stream, async, processing, data, queue, redis
 
-.. sourcecode:: python
 
     import time
     import random
-    import aioredis
 
     from streamengine import App
 
     app = App("ExampleApp")
 
 
-    @app.agent("redis_stream", concurrency=5)
+    @app.agent("somestream", concurrency=5)
     async def f(x):
-        # print received stream result
+        # print received stream record
         print(x)
 
 
     @app.timer(1)
     async def add():
-        # sends an item to the redis stream 'redis_stream' every second
-        t = str(time.time())
-        fields = {'time': t.encode('utf-8'), 'price': random.randint(10, 100)}
-        await app.send_once("redis_stream", fields)
-
+        # sends a new item to the redis stream 'somestream' every second
+        record = {'time': str(time.time()).encode('utf-8'), 'price': random.randint(10, 100)}
+        await app.send_once("somestream", record)
 
 
     if __name__ == "__main__":
