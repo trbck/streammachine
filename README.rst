@@ -10,32 +10,32 @@ For redis streams intro check: https://redis.io/topics/streams-intro
 :Keywords: stream, async, processing, data, queue, redis streams
 
 **STREAMENGINE** aims to be a redis stream processing library on top of asyncio, aioredis and separating decorator logic for simplicity.
-This project is heavily inspired by https://github.com/robinhood/faust but in a very early stage - support and suggestions are therefore very welcome!
+
+This project is heavily inspired by https://github.com/robinhood/faust but in an early stage - support and suggestions are therefore very welcome!
+
 
 
 .. sourcecode:: python
 
     import time
     import random
-    import aioredis
 
     from streamengine import App
 
     app = App("ExampleApp")
 
 
-    @app.agent("redis_stream", concurrency=5)
+    @app.agent("mystream", concurrency=5)
     async def f(x):
-        # print received stream result
+        # Prints received stream record from 'mystream' stream.
         print(x)
 
 
     @app.timer(1)
     async def add():
-        # sends an item to the redis stream 'redis_stream' every second
-        t = str(time.time())
-        fields = {'time': t.encode('utf-8'), 'price': random.randint(10, 100)}
-        await app.send_once("redis_stream", fields)
+        # Sends a record to the redis stream 'mystream' every second.
+        record = {'timestamp': str(time.time()).encode('utf-8'), 'price': random.randint(10, 100)}
+        await app.send_once("mystream", record)
 
 
     if __name__ == "__main__":
