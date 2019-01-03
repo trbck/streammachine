@@ -10,7 +10,7 @@ For redis streams intro check: https://redis.io/topics/streams-intro
 :Keywords: stream, async, processing, data, queue, redis streams
 
 **STREAMENGINE** aims to be a redis stream processing library on top of asyncio, aioredis and separating decorator logic for simplicity.
-This project is heavily inspired by https://github.com/robinhood/faust but in are very early stage - support and suggestions a very welcome!
+This project is heavily inspired by https://github.com/robinhood/faust but in a very early stage - support and suggestions are therefore very welcome!
 
 
 .. sourcecode:: python
