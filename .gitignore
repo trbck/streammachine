@@ -106,3 +106,6 @@ venv.bak/
 *.egg-info*
 .DS_Store
 .vscode
+performance
+performance/*
+
