@@ -106,13 +106,11 @@ class TestRedisConnection:
         with patch('streammachine.redisapi.coredis.Redis') as mock_redis:
             mock_client = MagicMock()
             mock_pipeline = MagicMock()
-            # Pipeline commands are queued (not awaited); execution happens
-            # on __aexit__, results available via pipe.results property
-            mock_pipeline.xadd = MagicMock()
-            mock_pipeline.results = ("id1", "id2")
-            mock_pipeline.__aenter__ = AsyncMock(return_value=mock_pipeline)
-            mock_pipeline.__aexit__ = AsyncMock(return_value=None)
-            mock_client.pipeline = MagicMock(return_value=mock_pipeline)
+            # pipeline() is awaited, commands are awaited as they queue, and
+            # execute() runs the batch and returns the results tuple
+            mock_pipeline.xadd = AsyncMock()
+            mock_pipeline.execute = AsyncMock(return_value=("id1", "id2"))
+            mock_client.pipeline = AsyncMock(return_value=mock_pipeline)
             mock_redis.return_value = mock_client
 
             conn = RedisConnection()

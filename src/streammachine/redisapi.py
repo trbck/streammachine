@@ -48,7 +48,7 @@ import logging
 from typing import Any, List, Optional
 
 import coredis
-from coredis import Redis
+from coredis import PureToken, Redis
 from coredis.stream import GroupConsumer
 
 from .models import (
@@ -219,7 +219,9 @@ class RedisConnection:
             timeout=timeout,
         )
 
-    async def pipeline_xadd(self, topic: str, records: List[dict]) -> List:
+    async def pipeline_xadd(
+        self, topic: str, records: List[dict], maxlen: Optional[int] = None
+    ) -> List:
         """
         Batch add multiple records to a Redis stream using pipeline for speed.
 
@@ -230,14 +232,25 @@ class RedisConnection:
         Args:
             topic: Stream name
             records: List of record dictionaries to add
+            maxlen: Optional approximate MAXLEN trim applied with each XADD
 
         Returns:
             List of message IDs from the XADD commands
         """
-        async with self.client.pipeline() as pipe:
-            for record in records:
-                pipe.xadd(topic, record)
-        return list(pipe.results) if pipe.results else []
+        trim_kwargs = (
+            dict(
+                trim_strategy=PureToken.MAXLEN,
+                trim_operator=PureToken.APPROXIMATELY,
+                threshold=maxlen,
+            )
+            if maxlen
+            else {}
+        )
+        pipe = await self.client.pipeline(transaction=False)
+        for record in records:
+            await pipe.xadd(topic, record, **trim_kwargs)
+        results = await pipe.execute()
+        return list(results)
 
     async def health_check(self) -> bool:
         """

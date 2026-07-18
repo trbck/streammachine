@@ -73,10 +73,8 @@ class TestRedisConnectionFailures:
         with patch('streammachine.redisapi.coredis.Redis') as mock_redis:
             mock_client = MagicMock()
             mock_pipeline = MagicMock()
-            mock_pipeline.xadd = MagicMock(side_effect=Exception("Pipeline error"))
-            mock_pipeline.__aenter__ = AsyncMock(return_value=mock_pipeline)
-            mock_pipeline.__aexit__ = AsyncMock(return_value=None)
-            mock_client.pipeline = MagicMock(return_value=mock_pipeline)
+            mock_pipeline.xadd = AsyncMock(side_effect=Exception("Pipeline error"))
+            mock_client.pipeline = AsyncMock(return_value=mock_pipeline)
             mock_redis.return_value = mock_client
 
             conn = RedisConnection()

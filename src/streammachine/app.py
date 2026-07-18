@@ -54,6 +54,8 @@ import venusian
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from typing import Any, Callable, List, Optional, Set
 
+from coredis import PureToken
+
 from .util import Registry, AgentTaskDecorator, TimerTaskDecorator
 from .models import (
     AppConfig,
@@ -156,6 +158,7 @@ class App:
         dashboard_port: int = 8000,
         dashboard_host: str = "localhost",
         dashboard_refresh_interval: int = 5,
+        stream_maxlen: Optional[int] = None,
     ):
         """
         Initialize the StreamMachine application.
@@ -169,6 +172,10 @@ class App:
             dashboard_port: Port for the dashboard server
             dashboard_host: Host for the dashboard server
             dashboard_refresh_interval: Heartbeat interval in seconds
+            stream_maxlen: Approximate MAXLEN applied on every send()/
+                send_batch() XADD so produced streams cannot grow unbounded.
+                Falls back to the STREAMMACHINE_STREAM_MAXLEN env var;
+                None/0 disables trimming (previous behavior).
         """
         self.config = AppConfig(
             name=name,
@@ -191,6 +198,10 @@ class App:
         self.rc = RedisConnection()
         self.storage = storage.Storage()
         self._is_shutting_down = False
+        if stream_maxlen is None:
+            env_maxlen = os.environ.get("STREAMMACHINE_STREAM_MAXLEN", "")
+            stream_maxlen = int(env_maxlen) if env_maxlen.strip().isdigit() else None
+        self.stream_maxlen: Optional[int] = stream_maxlen if stream_maxlen and stream_maxlen > 0 else None
 
         # Instance tracking for dashboard
         self._instance_id: str = str(uuid.uuid4())[:8]
@@ -563,6 +574,14 @@ class App:
         """
         t = time.time()
         record["sent"] = t
+        if self.stream_maxlen:
+            return await self.rc.client.xadd(
+                topic,
+                record,
+                trim_strategy=PureToken.MAXLEN,
+                trim_operator=PureToken.APPROXIMATELY,
+                threshold=self.stream_maxlen,
+            )
         return await self.rc.client.xadd(topic, record)
 
     async def send_batch(self, topic: str, records: List[dict]) -> List:
@@ -579,7 +598,7 @@ class App:
         t = time.time()
         for record in records:
             record["sent"] = t
-        return await self.rc.pipeline_xadd(topic, records)
+        return await self.rc.pipeline_xadd(topic, records, maxlen=self.stream_maxlen)
 
     async def shutdown(self) -> None:
         """
