@@ -216,3 +216,203 @@ class TestStreamConsumerRepoll:
 
         # Handler was called once (on the second iteration)
         assert len(handler_calls) == 1
+
+class TestStreamConsumerReconnect:
+    """A stream-read failure must reconnect, not end the consumer.
+
+    Regression tests for the 2026-07-29 fomo2 outage. Redis could not snapshot
+    (a corrupt stream rax segfaulted every bgsave child), so it went MISCONF and
+    began rejecting writes. XREADGROUP *is* a write — it mutates the group PEL —
+    so the read at the top of the consumer loop raised. That exception escaped
+    the inner try (which only guards the handler) and was caught outside the
+    while-True, ending the consumer for good. Every consumer in every group died
+    within one poll and none returned when Redis recovered 11.5h later; only the
+    timer-driven ingest stage survived, so raw data kept arriving while nothing
+    enriched, routed, processed or memorized it.
+    """
+
+    @staticmethod
+    def _config(handler):
+        mock_module = MagicMock()
+        mock_module.test_handler = handler
+        return ConsumerConfig(
+            decorator_type="agent",
+            topic="test_topic",
+            group="test_group",
+            obj_name="test_handler",
+            mod=mock_module,
+        )
+
+    @staticmethod
+    def _one_message_then_cancel():
+        """An iterator that yields exactly one message, then cancels the task."""
+        state = {"n": 0}
+
+        class _Cons:
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                state["n"] += 1
+                if state["n"] == 1:
+                    entry = MagicMock()
+                    entry.identifier = b"1-0"
+                    entry.field_values = {b"key": b"val"}
+                    return (b"test_topic", entry)
+                raise asyncio.CancelledError()
+
+        return _Cons()
+
+    @pytest.mark.asyncio
+    async def test_misconf_on_read_reconnects_and_keeps_processing(self):
+        """The exact incident: the read raises MISCONF, then Redis recovers."""
+        from coredis.exceptions import ResponseError
+
+        handler_calls = []
+
+        async def handler(msg):
+            handler_calls.append(msg)
+
+        consumer = StreamConsumer(self._config(handler))
+
+        misconf = ResponseError(
+            "MISCONF Redis is configured to save RDB snapshots, but it's "
+            "currently unable to persist to disk."
+        )
+        mock_rc = MagicMock()
+        mock_rc.consumer = AsyncMock(
+            side_effect=[misconf, self._one_message_then_cancel()]
+        )
+        mock_rc.close = AsyncMock()
+
+        slept = []
+
+        async def fake_sleep(delay):
+            slept.append(delay)
+
+        with patch('streammachine.app.RedisConnection', return_value=mock_rc):
+            with patch('streammachine.app.asyncio.sleep', new=fake_sleep):
+                await consumer()
+
+        # It came back and did real work after the failure — the whole point.
+        assert len(handler_calls) == 1
+        assert mock_rc.consumer.await_count == 2
+        # And it waited before retrying rather than hot-looping on a dead Redis.
+        assert consumer.RECONNECT_BACKOFF_MIN in slept
+
+    @pytest.mark.asyncio
+    async def test_consumer_name_is_stable_across_reconnects(self):
+        """Reconnecting under a NEW name would orphan that name's PEL entries.
+
+        Messages already delivered to this consumer are owned by its name. A
+        fresh UUID per retry leaves them pending under a name nobody reads
+        again, recoverable only via XAUTOCLAIM from elsewhere.
+        """
+        async def handler(msg):
+            pass
+
+        consumer = StreamConsumer(self._config(handler))
+
+        names = []
+
+        async def fake_consumer(topic, consumer_id, group):
+            names.append(consumer_id)
+            if len(names) == 1:
+                raise ConnectionResetError("connection reset by peer")
+            return self._one_message_then_cancel()
+
+        mock_rc = MagicMock()
+        mock_rc.consumer = fake_consumer
+        mock_rc.close = AsyncMock()
+
+        async def fake_sleep(delay):
+            pass
+
+        with patch('streammachine.app.RedisConnection', return_value=mock_rc):
+            with patch('streammachine.app.asyncio.sleep', new=fake_sleep):
+                await consumer()
+
+        assert len(names) == 2
+        assert names[0] == names[1]
+
+    @pytest.mark.asyncio
+    async def test_backoff_grows_and_stays_bounded(self):
+        """Repeated failures must back off, but never past the cap."""
+        async def handler(msg):
+            pass
+
+        consumer = StreamConsumer(self._config(handler))
+
+        attempts = {"n": 0}
+
+        async def fake_consumer(topic, consumer_id, group):
+            attempts["n"] += 1
+            if attempts["n"] > 12:
+                raise asyncio.CancelledError()
+            raise ConnectionResetError("still down")
+
+        mock_rc = MagicMock()
+        mock_rc.consumer = fake_consumer
+        mock_rc.close = AsyncMock()
+
+        slept = []
+
+        async def fake_sleep(delay):
+            slept.append(delay)
+
+        with patch('streammachine.app.RedisConnection', return_value=mock_rc):
+            with patch('streammachine.app.asyncio.sleep', new=fake_sleep):
+                await consumer()
+
+        waits = [d for d in slept if d > 0]
+        assert waits, "a failing consumer must wait before retrying"
+        assert waits == sorted(waits), "backoff must be non-decreasing"
+        assert max(waits) <= consumer.RECONNECT_BACKOFF_MAX
+        assert waits[0] == consumer.RECONNECT_BACKOFF_MIN
+
+    @pytest.mark.asyncio
+    async def test_handler_failure_does_not_reconnect(self):
+        """A bad payload is not a broken connection — keep the same session.
+
+        This is the other half of the severity split: if a raising handler
+        triggered a reconnect, one poison message would churn the connection.
+        """
+        async def handler(msg):
+            raise ValueError("bad payload")
+
+        consumer = StreamConsumer(self._config(handler))
+
+        mock_rc = MagicMock()
+        mock_rc.consumer = AsyncMock(return_value=self._one_message_then_cancel())
+        mock_rc.close = AsyncMock()
+
+        async def fake_sleep(delay):
+            pass
+
+        with patch('streammachine.app.RedisConnection', return_value=mock_rc):
+            with patch('streammachine.app.asyncio.sleep', new=fake_sleep):
+                await consumer()
+
+        assert mock_rc.consumer.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_cancellation_still_exits_cleanly(self):
+        """Shutdown must remain immediate — not retried like a fault."""
+        async def handler(msg):
+            pass
+
+        consumer = StreamConsumer(self._config(handler))
+
+        mock_rc = MagicMock()
+        mock_rc.consumer = AsyncMock(side_effect=asyncio.CancelledError())
+        mock_rc.close = AsyncMock()
+
+        async def fake_sleep(delay):
+            raise AssertionError("cancellation must not go through backoff")
+
+        with patch('streammachine.app.RedisConnection', return_value=mock_rc):
+            with patch('streammachine.app.asyncio.sleep', new=fake_sleep):
+                await consumer()
+
+        assert mock_rc.consumer.await_count == 1
+        mock_rc.close.assert_awaited()

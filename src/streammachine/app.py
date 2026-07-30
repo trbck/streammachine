@@ -764,13 +764,26 @@ class StreamConsumer:
         5. If processing fails, message remains in PEL for retry
 
     Error Handling:
-        The consumer loop catches exceptions and continues processing.
-        Errors are logged with exc_info=True for debugging. The consumer
-        only exits on CancelledError (shutdown) or catastrophic failures.
+        Two independent failure domains, deliberately handled differently:
+
+        - A handler raising on one message is logged and skipped; the loop keeps
+          going. One bad payload must not stall a stream.
+        - A failure in the *stream read itself* (XREADGROUP / XGROUP CREATE:
+          Redis down, MISCONF, connection reset, failover) reconnects with
+          exponential backoff and rejoins the group under the SAME consumer name.
+          It is not fatal. Treating it as fatal is what turned a recoverable
+          Redis fault into an 11.5h silent outage on 2026-07-29 — see the
+          comment in __call__.
+
+        The consumer exits only on CancelledError (shutdown).
 
     Args:
         config: ConsumerConfig with topic, group, handler function, etc.
     """
+
+    #: Reconnect backoff bounds, in seconds, for stream-read failures.
+    RECONNECT_BACKOFF_MIN = 1.0
+    RECONNECT_BACKOFF_MAX = 30.0
 
     def __init__(self, config: ConsumerConfig):
         """
@@ -804,39 +817,78 @@ class StreamConsumer:
         This is necessary because coredis connections are not thread-safe
         and each async task needs its own connection for concurrent ops.
         """
+        # Stable across reconnects ON PURPOSE: the consumer name owns its entries
+        # in the group PEL. Generating a fresh UUID per retry would orphan every
+        # in-flight message under a consumer name nobody reads again, so the
+        # backlog could only be recovered by XAUTOCLAIM from another process.
         consumer_id = str(uuid.uuid4())
-        self._rc = RedisConnection()
         group = self.config.group or DEFAULT_CONSUMER_GROUP
 
         logger.info(f"Starting consumer {consumer_id} for {self.config.topic} in group {group}")
 
+        backoff = self.RECONNECT_BACKOFF_MIN
         try:
-            cons = await self._rc.consumer(
-                self.config.topic,
-                consumer_id,
-                group
-            )
-
-            # The GroupConsumer async iterator raises StopAsyncIteration
-            # when xreadgroup returns no messages after the block timeout.
-            # We wrap in a while-True to keep polling for new messages.
             while True:
-                async for stream, entry in cons:
-                    try:
-                        await self._process_message(stream, entry, consumer_id)
-                    except Exception as e:
-                        logger.error(
-                            f"Error processing message from {stream}: {e}",
-                            exc_info=True
-                        )
-                        # Continue processing next messages
-                    await asyncio.sleep(0)  # Yield to event loop
-                # Iterator exhausted (timeout with no messages) — retry
-                await asyncio.sleep(0)
+                self._rc = RedisConnection()
+                try:
+                    cons = await self._rc.consumer(
+                        self.config.topic,
+                        consumer_id,
+                        group
+                    )
+
+                    # The GroupConsumer async iterator raises StopAsyncIteration
+                    # when xreadgroup returns no messages after the block timeout.
+                    # We wrap in a while-True to keep polling for new messages.
+                    while True:
+                        async for stream, entry in cons:
+                            try:
+                                await self._process_message(stream, entry, consumer_id)
+                            except Exception as e:
+                                logger.error(
+                                    f"Error processing message from {stream}: {e}",
+                                    exc_info=True
+                                )
+                                # Continue processing next messages
+                            await asyncio.sleep(0)  # Yield to event loop
+                        # Iterator exhausted (timeout with no messages) — retry.
+                        # We completed a healthy pass, so forget earlier trouble.
+                        backoff = self.RECONNECT_BACKOFF_MIN
+                        await asyncio.sleep(0)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    # A failure out here came from XREADGROUP / XGROUP CREATE
+                    # itself, not from the handler. This used to fall through to
+                    # the outer handler and END the consumer permanently, which
+                    # is how a recoverable Redis fault became a silent outage:
+                    # on 2026-07-29 Redis could not snapshot (corrupt stream
+                    # rax -> SIGSEGV in every bgsave child), went MISCONF, and
+                    # started rejecting writes. XREADGROUP *is* a write — it
+                    # mutates the group PEL — so every consumer in every group
+                    # died within one poll, and none came back when Redis
+                    # recovered 11.5h later. Only the timer-driven ingest stage
+                    # survived, so raw data kept arriving while nothing enriched,
+                    # routed, processed or memorized it, and a human had to
+                    # notice and restart the process.
+                    logger.error(
+                        f"Consumer {consumer_id} stream error, reconnecting in "
+                        f"{backoff:.1f}s: {e}",
+                        exc_info=True
+                    )
+                    if self._rc:
+                        try:
+                            await self._rc.close()
+                        except Exception:  # pragma: no cover — best-effort teardown
+                            logger.debug(
+                                f"Consumer {consumer_id}: error closing connection",
+                                exc_info=True
+                            )
+                        self._rc = None
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, self.RECONNECT_BACKOFF_MAX)
         except asyncio.CancelledError:
             logger.info(f"Consumer {consumer_id} cancelled")
-        except Exception as e:
-            logger.error(f"Consumer {consumer_id} error: {e}", exc_info=True)
         finally:
             if self._rc:
                 await self._rc.close()
