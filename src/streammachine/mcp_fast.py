@@ -13,13 +13,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from typing import Any, Optional
 
-try:
-    from mcp.server.fastmcp import FastMCP
-except ImportError:
-    print("FastMCP not available. Install with: pip install mcp[cli]")
-    raise
+from mcp.server.fastmcp import FastMCP
 
 # StreamMachine imports
 from streammachine.redisapi import RedisConnection
@@ -37,11 +34,6 @@ except ImportError:
 # Global state
 _ohlc_aggregators = {}  # OHLC aggregators by name
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
 logger = logging.getLogger("streammachine.mcp")
 
 # Create FastMCP server
@@ -109,9 +101,8 @@ async def stream_send(stream: str, message: dict[str, str]) -> str:
     """
     redis = await get_redis()
     await redis._ensure_pool()
-    import time
-    message["sent"] = str(time.time())
-    result = await redis.client.xadd(stream, message)
+    payload = {**message, "sent": str(time.time())}
+    result = await redis.client.xadd(stream, payload)
     return _format_response({"message_id": result})
 
 
@@ -282,7 +273,7 @@ async def redis_ping() -> str:
 # =============================================================================
 
 @mcp.tool()
-async def ohlc_create(name: str, intervals: list = [60000, 300000]) -> str:
+async def ohlc_create(name: str, intervals: Optional[list[int]] = None) -> str:
     """Create an OHLC aggregator for real-time candle aggregation from tick data.
 
     Args:
@@ -296,6 +287,7 @@ async def ohlc_create(name: str, intervals: list = [60000, 300000]) -> str:
         return _format_response(None, success=False, error="FastOHLC not available")
     if name in _ohlc_aggregators:
         return _format_response(None, success=False, error=f"Aggregator '{name}' already exists")
+    intervals = intervals or [60000, 300000]
     _ohlc_aggregators[name] = create_ohlc_aggregator(intervals=intervals)
     return _format_response({
         "name": name,
@@ -310,7 +302,7 @@ async def ohlc_update(
     symbol: str,
     price: float,
     volume: float,
-    timestamp_ms: int = None
+    timestamp_ms: Optional[int] = None
 ) -> str:
     """Update an OHLC aggregator with a new tick (trade data).
 
@@ -330,7 +322,7 @@ async def ohlc_update(
         return _format_response(None, success=False, error=f"Aggregator '{name}' not found")
     agg = _ohlc_aggregators[name]
     if timestamp_ms is None:
-        timestamp_ms = int(__import__("time").time() * 1000)
+        timestamp_ms = int(time.time() * 1000)
     agg.update_tick(symbol.encode('utf-8'), price, volume, timestamp_ms)
     return _format_response({
         "name": name,
@@ -491,7 +483,6 @@ async def ohlc_list() -> str:
 @mcp.resource("streammachine://config")
 async def get_config() -> str:
     """Get current configuration and environment variables."""
-    import os
     config = {
         "redis_url": os.environ.get("REDIS_URL", "redis://localhost:6379"),
         "redis_host": os.environ.get("REDIS_HOST", "localhost"),

@@ -122,9 +122,10 @@ class TestRedisConnectionIntegration:
             count=10
         )
 
+        # coredis returns {stream: (entry, ...)}
         assert result is not None
         assert len(result) == 1
-        stream_name, messages = result[0]
+        messages = next(iter(result.values()))
         assert len(messages) == 2
 
     @pytest.mark.asyncio
@@ -137,20 +138,15 @@ class TestRedisConnectionIntegration:
         # Add a message first (group needs stream to exist)
         await redis_connection.client.xadd(unique_stream_name, {"test": "data"})
 
-        # Create group with GroupConsumer (it creates group automatically)
-        from coredis.patterns.streams import GroupConsumer
-        consumer = GroupConsumer(
-            redis_connection.client,
-            streams=[unique_stream_name],
-            group=unique_group_name,
-            consumer="test_consumer",
-            start_from_backlog=False,
+        # GroupConsumer creates the group (at the newest id) on first fetch
+        consumer = await redis_connection.consumer(
+            [unique_stream_name], "test_consumer", unique_group_name, timeout=200
         )
-        # Just creating it should create the group
-        # We'll verify by checking group exists
+        async for _stream, _entry in consumer:
+            break
+
         groups = await redis_connection.client.xinfo_groups(unique_stream_name)
-        group_names = [g.get(b"name") for g in groups]
-        # Group name might be bytes or str depending on coredis version
+        group_names = [g.get("name", g.get(b"name")) for g in groups]
         assert any(unique_group_name in str(g) for g in group_names)
 
 
@@ -167,11 +163,7 @@ class TestStreamConsumerIntegration:
         async def handler(msg: Message):
             received_messages.append(msg)
 
-        # Create app with agent
-        app = App(name="test_app", to_scan=False)
-
-        # We'll manually test the consumer since we need precise control
-        # Create consumer config
+        # Drive a StreamConsumer directly for precise control
         mock_module = type('Module', (), {})()
         mock_module.test_handler = handler
 
@@ -188,24 +180,31 @@ class TestStreamConsumerIntegration:
         await rc._ensure_pool()
 
         try:
-            # Add message to stream
-            msg_id = await rc.client.xadd(unique_stream_name, {"key": "value"})
-
-            # Create consumer and read one message
+            # Consumer groups start at the newest id, so start the consumer
+            # before producing.
             from streammachine.app import StreamConsumer
             consumer = StreamConsumer(config)
-
-            # Use timeout to ensure we don't hang
             read_task = asyncio.create_task(consumer())
-            await asyncio.sleep(2)  # Let consumer start and read
+            await asyncio.sleep(0.5)
+
+            await rc.client.xadd(unique_stream_name, {"key": "value"})
+
+            for _ in range(40):
+                if received_messages:
+                    break
+                await asyncio.sleep(0.1)
+
             read_task.cancel()
             try:
                 await read_task
             except asyncio.CancelledError:
                 pass
 
-            # Verify message was received
-            assert len(received_messages) >= 0  # May or may not have received
+            assert len(received_messages) == 1
+            msg = received_messages[0]
+            assert msg.topic == unique_stream_name
+            assert msg.message["key"] == "value"
+            assert msg.received is not None
 
         finally:
             await rc.close()
@@ -219,53 +218,35 @@ class TestStreamConsumerIntegration:
         await rc._ensure_pool()
 
         try:
-            # Add multiple messages
+            # Create the group at the stream start so the backlog is delivered
+            await rc.client.xgroup_create(unique_stream_name, unique_group_name, "0", mkstream=True)
+
             for i in range(10):
                 await rc.client.xadd(unique_stream_name, {"idx": str(i)})
 
-            # Create two consumers in same group
-            messages_consumer1 = []
-            messages_consumer2 = []
+            received = {"consumer1": [], "consumer2": []}
 
-            async def consumer1_task():
+            async def consume(name: str):
                 async with RedisConnection(url=redis_url) as conn:
                     consumer = await conn.consumer(
-                        [unique_stream_name],
-                        "consumer1",
-                        unique_group_name,
-                        timeout=1000,
+                        [unique_stream_name], name, unique_group_name, timeout=500
                     )
-                    async for stream, entry in consumer:
-                        messages_consumer1.append(entry)
-                        if len(messages_consumer1) >= 5:
-                            break
+                    async for _stream, entry in consumer:
+                        received[name].append(entry)
 
-            async def consumer2_task():
-                async with RedisConnection(url=redis_url) as conn:
-                    consumer = await conn.consumer(
-                        [unique_stream_name],
-                        "consumer2",
-                        unique_group_name,
-                        timeout=1000,
-                    )
-                    async for stream, entry in consumer:
-                        messages_consumer2.append(entry)
-                        if len(messages_consumer2) >= 5:
-                            break
+            tasks = [asyncio.create_task(consume(n)) for n in received]
+            for _ in range(50):
+                if sum(len(v) for v in received.values()) >= 10:
+                    break
+                await asyncio.sleep(0.1)
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
-            # Run both consumers concurrently
-            try:
-                await asyncio.wait_for(
-                    asyncio.gather(consumer1_task(), consumer2_task()),
-                    timeout=10.0,
-                )
-            except asyncio.TimeoutError:
-                pass
-
-            # Messages should be distributed between consumers
-            # At least one consumer should have received messages
-            total_received = len(messages_consumer1) + len(messages_consumer2)
-            assert total_received > 0, "No messages received"
+            # Every entry is delivered to exactly one consumer in the group
+            all_ids = [e.identifier for v in received.values() for e in v]
+            assert len(all_ids) == 10
+            assert len(set(all_ids)) == 10
 
         finally:
             await rc.close()
@@ -279,17 +260,26 @@ class TestStreamExpiration:
         """Test stream trimming with MAXLEN."""
         await redis_connection._ensure_pool()
 
-        # Add messages with MAXLEN constraint
-        for i in range(100):
-            await redis_connection.client.xadd(
-                unique_stream_name,
-                {"idx": str(i)},
-                maxlen=10,
-            )
+        # Approximate MAXLEN trims at node boundaries, so allow slack
+        records = [{"idx": str(i)} for i in range(500)]
+        await redis_connection.pipeline_xadd(unique_stream_name, records, maxlen=10)
 
-        # Check stream length
         length = await redis_connection.client.xlen(unique_stream_name)
-        assert length <= 10
+        assert length < 500
+
+    @pytest.mark.asyncio
+    async def test_app_send_respects_stream_maxlen(self, redis_url, unique_stream_name):
+        """App(stream_maxlen=...) trims on every send() and send_batch()."""
+        os.environ["REDIS_URL"] = redis_url
+        app = App(name="maxlen_app", to_scan=False, dashboard_enabled=False, stream_maxlen=10)
+        try:
+            for i in range(300):
+                await app.send(unique_stream_name, {"idx": str(i)})
+            await app.send_batch(unique_stream_name, [{"idx": str(i)} for i in range(300)])
+            length = await app.rc.client.xlen(unique_stream_name)
+            assert length < 600
+        finally:
+            await app.rc.close()
 
     @pytest.mark.asyncio
     async def test_stream_ttl(self, redis_connection, unique_stream_name):
@@ -306,7 +296,7 @@ class TestStreamExpiration:
         await asyncio.sleep(2)
 
         # Stream should no longer exist
-        exists = await redis_connection.client.exists(unique_stream_name)
+        exists = await redis_connection.client.exists([unique_stream_name])
         assert exists == 0
 
 
@@ -351,10 +341,8 @@ class TestPipelineOperations:
         await redis_connection._ensure_pool()
 
         # Measure individual xadds
-        start = time.time()
         for i in range(100):
             await redis_connection.client.xadd(unique_stream_name, {"idx": str(i)})
-        individual_time = time.time() - start
 
         # Create new stream for pipeline test
         pipeline_stream = f"{unique_stream_name}_pipeline"
@@ -419,6 +407,6 @@ async def cleanup_test_streams(redis_connection, unique_stream_name):
     yield
     try:
         # Delete the test stream
-        await redis_connection.client.delete(unique_stream_name)
+        await redis_connection.client.delete([unique_stream_name])
     except Exception:
         pass  # Stream may not exist

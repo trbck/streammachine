@@ -5,7 +5,7 @@ import asyncio
 import pytest
 from unittest.mock import MagicMock, patch, AsyncMock
 
-from streammachine.app import App, StreamConsumer, agent_container, timer_container
+from streammachine.app import App, StreamConsumer, timer_container
 from streammachine.models import ConsumerConfig, TimerConfig
 
 
@@ -69,7 +69,6 @@ class TestAgentContainer:
         )
 
         # We can't fully test the consumer without Redis, but we can check it creates
-        from streammachine.app import StreamConsumer
         # This test verifies the config is passed correctly
         assert config.topic == "test_topic"
         assert config.group == "test_group"

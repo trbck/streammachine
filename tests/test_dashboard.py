@@ -16,8 +16,6 @@ from streammachine.dashboard import (
     InstanceMetrics,
     create_app,
     get_dashboard_html,
-    INSTANCES_KEY_PREFIX,
-    METRICS_KEY_PREFIX,
     MASTER_KEY,
     LOCK_KEY,
     LOCK_TTL,
@@ -558,14 +556,13 @@ class TestLockSafety:
 
         # Become master
         await manager.try_become_master(8000, "localhost", "test_id")
-        token_before = manager._lock_token
 
         # Release should detect ownership loss and NOT delete MASTER_KEY
         await manager.release_lock()
 
         # Verify delete was NOT called for MASTER_KEY
         # delete should not be called since lock_released was False
-        delete_calls = [call for call in mock_client.delete.call_args_list]
+        delete_calls = list(mock_client.delete.call_args_list)
         # MASTER_KEY delete should not happen when ownership is lost
         master_key_deletes = [c for c in delete_calls if MASTER_KEY in str(c)]
         assert len(master_key_deletes) == 0, "MASTER_KEY should not be deleted when lock ownership lost"
@@ -598,7 +595,6 @@ class TestLockSafety:
 
         # Simulate heartbeat iteration that loses lock
         # We need to call _heartbeat_loop once and verify server is stopped
-        import asyncio
 
         async def run_one_heartbeat():
             # Simulate one heartbeat cycle

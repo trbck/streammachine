@@ -33,8 +33,8 @@ Usage:
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Any
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
 
 # Try to import Cython-accelerated version
 try:
@@ -91,7 +91,7 @@ class FastOHLC_Python:
         tick_count: Total number of ticks processed
     """
 
-    def __init__(self, intervals: List[int] = None):
+    def __init__(self, intervals: Optional[List[int]] = None):
         """
         Initialize OHLC aggregator.
 
@@ -178,8 +178,8 @@ class FastOHLC_Python:
         entries: List,
         price_field: str = "price",
         volume_field: str = "volume",
-        symbol_field: str = None,
-        timestamp_field: str = None
+        symbol_field: Optional[str] = None,
+        timestamp_field: Optional[str] = None
     ) -> int:
         """
         Process a batch of Redis stream entries.
@@ -373,7 +373,7 @@ else:
     FastOHLC = FastOHLC_Python
 
 
-def create_ohlc_aggregator(intervals: List[int] = None) -> FastOHLC:
+def create_ohlc_aggregator(intervals: Optional[List[int]] = None) -> FastOHLC:
     """
     Create an OHLC aggregator with the best available implementation.
 
@@ -466,11 +466,11 @@ class FastOHLCConsumer:
         self,
         input_stream: str,
         output_stream_prefix: str = "candles",
-        intervals: List[int] = None,
+        intervals: Optional[List[int]] = None,
         group: str = "ohlc_workers",
         price_field: str = "price",
         volume_field: str = "volume",
-        symbol_field: str = None,
+        symbol_field: Optional[str] = None,
         flush_interval_ms: int = 1000
     ):
         """
@@ -533,29 +533,52 @@ class FastOHLCConsumer:
 
         self._aggregator.update_tick(symbol, price, volume, timestamp_ms)
 
-    async def emit_candles(self):
-        """Emit completed candles to output streams."""
-        if not self._redis or not self._redis.client:
-            return
+    @staticmethod
+    def interval_name(interval_ms: int) -> str:
+        """Human-readable suffix for an interval, e.g. 60000 -> "1m"."""
+        if interval_ms >= 86400000:
+            return f"{interval_ms // 86400000}d"
+        if interval_ms >= 3600000:
+            return f"{interval_ms // 3600000}h"
+        if interval_ms >= 60000:
+            return f"{interval_ms // 60000}m"
+        return f"{interval_ms}ms"
 
-        current_time = int(time.time() * 1000)
+    def output_stream(self, interval_ms: int) -> str:
+        """Name of the output stream for an interval (prefix + interval name)."""
+        return f"{self.output_stream_prefix}_{self.interval_name(interval_ms)}"
 
-        for interval_ms in self._intervals:
-            # Get interval name for stream
-            if interval_ms >= 86400000:  # >= 1 day
-                interval_name = f"{interval_ms // 86400000}d"
-            elif interval_ms >= 3600000:  # >= 1 hour
-                interval_name = f"{interval_ms // 3600000}h"
-            elif interval_ms >= 60000:  # >= 1 minute
-                interval_name = f"{interval_ms // 60000}m"
-            else:
-                interval_name = f"{interval_ms}ms"
+    async def emit_candles(self, symbols: Optional[List[bytes]] = None) -> int:
+        """
+        Emit completed candles for the given symbols to the output streams.
 
-            stream_name = f"{self.output_stream_prefix}_{interval_name}"
+        Args:
+            symbols: Symbols to emit for. Defaults to every symbol seen so far
+                (pure-Python aggregator only; pass explicitly for Cython).
 
-            # For each symbol, emit completed candles
-            # This is a simplified version - in production you'd track symbols
-            pass  # TODO: Implement when integrated with App
+        Returns:
+            Number of candles emitted
+        """
+        if not self._redis:
+            return 0
+        if symbols is None:
+            symbols = list(getattr(self._aggregator, "_candles", {}).keys())
+
+        await self._redis._ensure_pool()
+        now_ms = int(time.time() * 1000)
+        emitted = 0
+        for interval_ms in self.intervals:
+            stream_name = self.output_stream(interval_ms)
+            for symbol in symbols:
+                completed = self._aggregator.get_completed_candles(symbol, interval_ms, now_ms)
+                for candle in completed:
+                    await self._redis.client.xadd(
+                        stream_name, format_candle_for_redis(candle, symbol, interval_ms)
+                    )
+                    emitted += 1
+                if completed:
+                    self._aggregator.flush_interval(symbol, interval_ms, now_ms)
+        return emitted
 
     @property
     def aggregator(self) -> FastOHLC:

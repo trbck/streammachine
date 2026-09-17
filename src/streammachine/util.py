@@ -33,24 +33,21 @@ Async/Sync Bridging:
     and using async Redis operations. Use SyncToAsync only when
     you must call sync code from an async context.
 """
-#https://gitlab.com/pineiden/tasktools/blob/master/tasktools/async_queue.py
+# AsyncProcessQueue adapted from
+# https://gitlab.com/pineiden/tasktools/blob/master/tasktools/async_queue.py
 from multiprocessing import Manager, cpu_count
-from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 import asyncio
+import contextvars
 import venusian
 import functools
-import os
+import sys
 import threading
 import time
 import inspect
 from typing import Any, Callable, Optional, Awaitable
 
 from .models import ConsumerConfig, TimerConfig
-
-try:
-    import contextvars  # Python 3.7+ only.
-except ImportError:
-    contextvars = None
 
 # === Decorators and Registry ===
 
@@ -80,21 +77,7 @@ class AgentTaskDecorator:
         self.config = ConsumerConfig("agent", stream, group, concurrency, processes)
 
     def __call__(self, wrapped: Callable) -> Any:
-        me = self
-        class Wrapper:
-            def __init__(self, wrapped_func: Callable):
-                self.callback = wrapped
-            def on_scan(self, scanner, name, obj):
-                frm = inspect.stack()[len(inspect.stack()) - 1]
-                me.config.mod = inspect.getmodule(frm[0])
-                me.config.obj_name = self.callback.__name__
-                me.config.inner_vars = inspect.signature(self.callback)
-                scanner.registry.add(me.config)
-            async def __call__(self, *args, **kwargs):
-                return await self.callback(*args, **kwargs)
-        w = Wrapper(wrapped)
-        venusian.attach(w, w.on_scan)
-        return w
+        return _attach(wrapped, self.config)
 
 class TimerTaskDecorator:
     """
@@ -120,21 +103,36 @@ class TimerTaskDecorator:
     def __init__(self, t: int):
         self.config = TimerConfig("timer", t)
     def __call__(self, wrapped: Callable) -> Any:
-        me = self
-        class Wrapper:
-            def __init__(self, wrapped_func: Callable):
-                self.callback = wrapped
-            def on_scan(self, scanner, name, obj):
-                frm = inspect.stack()[5]
-                me.config.mod = inspect.getmodule(frm[0])
-                me.config.obj_name = self.callback.__name__
-                me.config.inner_vars = inspect.signature(self.callback)
-                scanner.registry.add(me.config)
-            async def __call__(self, *args, **kwargs):
-                return await self.callback(*args, **kwargs)
-        w = Wrapper(wrapped)
-        venusian.attach(w, w.on_scan)
-        return w
+        return _attach(wrapped, self.config)
+
+
+class _TaskWrapper:
+    """Callable stand-in for a decorated handler that carries venusian metadata."""
+
+    def __init__(self, wrapped: Callable, config: Any):
+        self.callback = wrapped
+        self.config = config
+        functools.update_wrapper(self, wrapped)
+
+    def on_scan(self, scanner: venusian.Scanner, name: str, obj: Any) -> None:
+        # The handler lives in the module that defined it; look it up by
+        # __module__ rather than walking the call stack, which breaks under
+        # test runners and when handlers are imported from another module.
+        self.config.mod = sys.modules.get(self.callback.__module__)
+        self.config.obj_name = self.callback.__name__
+        self.config.inner_vars = inspect.signature(self.callback)
+        scanner.registry.add(self.config)
+
+    async def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        return await self.callback(*args, **kwargs)
+
+
+def _attach(wrapped: Callable, config: Any) -> _TaskWrapper:
+    wrapper = _TaskWrapper(wrapped, config)
+    # depth=2: skip this helper and the decorator's __call__ so venusian records
+    # the user's module (it only fires callbacks while scanning that module).
+    venusian.attach(wrapper, wrapper.on_scan, depth=2)
+    return wrapper
 
 class Registry:
     """
@@ -239,35 +237,23 @@ class SyncToAsync:
         2. Allow other async tasks to continue
         3. Run multiple sync operations concurrently
 
-    Environment Variables:
-        ASGI_THREADS: Set to configure the default thread pool size
-
     Context Variables:
         contextvars are preserved when running in the executor, so
         any context set in the async context is available in the sync function.
 
     Adapted from: Django Channels sync_to_async
     """
-    if "ASGI_THREADS" in os.environ:
-        loop = asyncio.get_event_loop()
-        loop.set_default_executor(ThreadPoolExecutor(max_workers=int(os.environ["ASGI_THREADS"])))
     threadlocal = threading.local()
     def __init__(self, func: Callable):
         self.func = func
     async def __call__(self, *args, **kwargs):
-        loop = asyncio.get_event_loop()
-        if contextvars is not None:
-            context = contextvars.copy_context()
-            child = functools.partial(self.func, *args, **kwargs)
-            func = context.run
-            args = (child, )
-            kwargs = {}
-        else:
-            func = self.func
+        loop = asyncio.get_running_loop()
+        context = contextvars.copy_context()
+        child = functools.partial(self.func, *args, **kwargs)
         future = loop.run_in_executor(
             None,
-            functools.partial(self.thread_handler, loop, func, *args, **kwargs))
-        return await asyncio.wait_for(future, timeout=None)
+            functools.partial(self.thread_handler, loop, context.run, child))
+        return await future
     def __get__(self, parent, objtype):
         return functools.partial(self.__call__, parent)
     def thread_handler(self, loop, func, *args, **kwargs):
@@ -330,11 +316,11 @@ class _ProcQueue:
         else:
             raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
     async def coro_put(self, item: Any) -> Any:
-        loop = asyncio.get_event_loop()
-        return (await loop.run_in_executor(self._executor, self.put, item))
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(self._executor, self.put, item)
     async def coro_get(self) -> Any:
-        loop = asyncio.get_event_loop()
-        return (await loop.run_in_executor(self._executor, self.get))
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(self._executor, self.get)
     def cancel_join_thread(self) -> None:
         self._cancelled_join = True
         self._queue.cancel_join_thread()
@@ -342,9 +328,3 @@ class _ProcQueue:
         self._queue.join_thread()
         if self._real_executor and not self._cancelled_join:
             self._real_executor.shutdown()
-
-# --- Cythonization candidates ---
-# If you have any CPU-bound data processing, mark here for Cythonization.
-# Example:
-# def heavy_processing(...):
-#     ... # Move to .pyx and use nogil for true parallelism

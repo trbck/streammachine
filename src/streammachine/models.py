@@ -20,20 +20,14 @@ Redis Stream ID Format:
 """
 from __future__ import annotations
 
-import json
 import os
 import time
-from dataclasses import asdict, dataclass, field, is_dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from typing import Any, Dict, List, Optional, Tuple, Type, TypeVar, Union
 import pandas as pd
 
-# Try to import the Cython-accelerated decoder
-try:
-    from cython_decode import decode_dict_bytes_to_utf8
-    _has_cython_decode = True
-except ImportError:
-    decode_dict_bytes_to_utf8 = None
-    _has_cython_decode = False
+# Cython-accelerated decoder (None when the extension is not compiled)
+from .cython import _has_cython_decode, decode_dict_bytes_to_utf8
 
 # Configuration from environment variables
 REDIS_CONNECTION_STRING: str = os.getenv("REDIS_URL", "redis://localhost:6379")
@@ -430,7 +424,7 @@ class Message:
     sent: Optional[float] = None
     received: Optional[float] = None
     consumer_id: Optional[str] = None
-    data: Optional[Tuple[str, Dict]] = None
+    data: Optional[Dict[bytes, bytes]] = None
 
     @property
     def message(self) -> Dict[str, str]:
@@ -494,7 +488,7 @@ class ConsumerConfig:
     Configuration for a stream consumer agent.
     """
     decorator_type: str
-    topic: str
+    topic: Union[str, List[str]]
     group: str = DEFAULT_CONSUMER_GROUP
     concurrency: int = 1
     processes: Optional[int] = None
@@ -573,5 +567,3 @@ __all__ = [
     "TimerConfig",
     "StreamTopic",
 ]
-
-

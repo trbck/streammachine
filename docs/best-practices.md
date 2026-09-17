@@ -180,7 +180,8 @@ async def handler(record: Message):
 total_concurrency = sum(agent.concurrency for agent in agents)
 pool_size = total_concurrency + len(timers) + 10  # overhead
 
-app = App(redis_max_connections=pool_size)
+# Pool size is per RedisConnection, configured via the environment:
+# REDIS_MAX_CONNECTIONS=<pool_size>
 ```
 
 ## Idempotency
@@ -278,7 +279,8 @@ def redis_container():
 @pytest.mark.asyncio
 async def test_end_to_end(redis_container):
     # Test with real Redis
-    app = App(redis_url=redis_container.get_connection_url())
+    os.environ["REDIS_URL"] = redis_container.get_connection_url()
+    app = App()
     # ...
 ```
 

@@ -20,7 +20,8 @@ Connection Pooling:
     context before use (coredis 6.x requirement).
 
     Key methods:
-    - _ensure_pool(): Enters the pool context (creates task group)
+    - _ensure_pool(): Enters the pool context (creates task group); called
+      automatically by consumer(), pipeline_xadd() and health_check()
     - close(): Exits the pool context and closes connections
 
 Consumer Groups:
@@ -44,12 +45,19 @@ Example:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
-from typing import Any, List, Optional
+import os
+from typing import Any, List, Optional, Union
 
 import coredis
 from coredis import PureToken, Redis
-from coredis.stream import GroupConsumer
+
+# GroupConsumer moved between modules across coredis releases.
+try:
+    from coredis.patterns.streams import GroupConsumer
+except ImportError:  # pragma: no cover - older coredis
+    from coredis.stream import GroupConsumer
 
 from .models import (
     REDIS_HOST,
@@ -135,13 +143,19 @@ class RedisConnection:
             max_connections: Max connection pool size (default from REDIS_MAX_CONNECTIONS env var)
             url: Redis connection URL (overrides individual params if provided)
         """
-        self._url = url or REDIS_CONNECTION_STRING
+        self._url = url or os.environ.get("REDIS_URL") or REDIS_CONNECTION_STRING
         self._host = host or REDIS_HOST
         self._port = port or REDIS_PORT
         self._db = db if db is not None else REDIS_DB
         self._max_connections = max_connections or REDIS_MAX_CONNECTIONS
-        self._use_url = url is not None
+        # An explicit url wins; otherwise REDIS_URL from the environment is
+        # honoured unless individual host/port/db parameters were given.
+        self._use_url = url is not None or (
+            host is None and port is None and db is None and bool(os.environ.get("REDIS_URL"))
+        )
         self._client: Optional[Redis[bytes]] = None
+        self._pool_entered: bool = False
+        self._pool_lock: Optional[asyncio.Lock] = None
 
     @property
     def client(self) -> Redis[bytes]:
@@ -161,8 +175,29 @@ class RedisConnection:
                 )
         return self._client
 
+    async def _ensure_pool(self) -> None:
+        """Enter the connection pool's async context exactly once.
+
+        coredis 6.x refuses to hand out connections until the pool has been
+        entered as an async context manager (that is where its task group is
+        created). Older coredis pools have no such context and need nothing.
+        Every public method on this class calls this first, so callers only
+        need it when they use ``client`` directly.
+        """
+        if self._pool_entered:
+            return
+        if self._pool_lock is None:
+            self._pool_lock = asyncio.Lock()
+        async with self._pool_lock:
+            if not self._pool_entered:
+                enter = getattr(self.client.connection_pool, "__aenter__", None)
+                if enter is not None:
+                    await enter()
+                self._pool_entered = True
+
     async def __aenter__(self) -> "RedisConnection":
-        """Async context manager entry."""
+        """Async context manager entry - initializes the connection pool."""
+        await self._ensure_pool()
         return self
 
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> bool:
@@ -175,16 +210,21 @@ class RedisConnection:
         if self._client is None:
             return
         try:
+            exit_ = getattr(self.client.connection_pool, "__aexit__", None)
+            if self._pool_entered and exit_ is not None:
+                await exit_(None, None, None)
             await self.client.quit()
             logger.debug("Redis connection closed")
         except Exception as e:
             # Connection may not have been established (lazy connection).
             # This is fine during shutdown.
             logger.debug(f"Redis connection close skipped: {e}")
+        finally:
+            self._pool_entered = False
 
     async def consumer(
         self,
-        channel: List[str],
+        channel: Union[str, List[str]],
         consumer: str,
         group: str,
         start_from_backlog: bool = False,
@@ -195,7 +235,7 @@ class RedisConnection:
         Create a Redis stream group consumer for the given channels.
 
         Args:
-            channel: List of stream names to consume from
+            channel: Stream name or list of stream names to consume from
             consumer: Unique consumer identifier
             group: Consumer group name
             start_from_backlog: Whether to start from pending messages
@@ -209,6 +249,7 @@ class RedisConnection:
         """
         if isinstance(channel, str):
             channel = [channel]
+        await self._ensure_pool()
         return GroupConsumer(
             self.client,
             streams=channel,
@@ -225,9 +266,10 @@ class RedisConnection:
         """
         Batch add multiple records to a Redis stream using pipeline for speed.
 
-        In coredis, pipeline commands are queued without await. The pipeline
-        executes automatically when the async-with block exits, and results
-        are available via pipe.results.
+        Supports both pipeline APIs: coredis 6.x queues commands synchronously
+        and runs the batch when the pipeline's async context exits (replies on
+        ``pipe.results``); older coredis awaits ``pipeline()``, each queued
+        command and ``execute()``.
 
         Args:
             topic: Stream name
@@ -237,20 +279,29 @@ class RedisConnection:
         Returns:
             List of message IDs from the XADD commands
         """
-        trim_kwargs = (
-            dict(
-                trim_strategy=PureToken.MAXLEN,
-                trim_operator=PureToken.APPROXIMATELY,
-                threshold=maxlen,
-            )
+        trim_kwargs: dict = (
+            {
+                "trim_strategy": PureToken.MAXLEN,
+                "trim_operator": PureToken.APPROXIMATELY,
+                "threshold": maxlen,
+            }
             if maxlen
             else {}
         )
-        pipe = await self.client.pipeline(transaction=False)
-        for record in records:
-            await pipe.xadd(topic, record, **trim_kwargs)
-        results = await pipe.execute()
-        return list(results)
+        await self._ensure_pool()
+        pipe = self.client.pipeline(transaction=False)
+        if inspect.isawaitable(pipe):  # coredis < 6
+            pipe = await pipe
+        if hasattr(pipe, "execute"):  # coredis < 6
+            for record in records:
+                queued = pipe.xadd(topic, record, **trim_kwargs)
+                if inspect.isawaitable(queued):
+                    await queued
+            return list(await pipe.execute())
+        async with pipe:  # coredis >= 6
+            for record in records:
+                pipe.xadd(topic, record, **trim_kwargs)
+        return list(pipe.results)
 
     async def health_check(self) -> bool:
         """
@@ -260,42 +311,9 @@ class RedisConnection:
             True if connection is healthy, False otherwise
         """
         try:
+            await self._ensure_pool()
             await self.client.ping()
             return True
         except Exception as e:
             logger.error(f"Redis health check failed: {e}")
             return False
-
-
-async def tests():
-    """Test Redis connection functionality."""
-    rc = RedisConnection()
-
-    await rc.client.flushdb()
-
-    async def producer():
-        while True:
-            [await rc.client.xadd("channel", {"id": i}) for i in range(11)]
-            await asyncio.sleep(1)
-
-    async def consumer():
-        cons = await rc.consumer("channel", "consumer1", "group")
-
-        while True:
-            async for stream, entry in cons:
-                print(stream)
-                print(entry)
-
-    res1, res2 = await asyncio.gather(
-        producer(),
-        consumer()
-    )
-
-    print("##################################################################################")
-    print("test done")
-    print("##################################################################################")
-
-    await rc.close()
-
-
-# asyncio.run(tests())

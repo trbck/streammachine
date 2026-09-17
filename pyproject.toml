@@ -1,171 +1,118 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "streammachine"
-version = "0.1.0"
-description = "High-performance async stream processing with Redis Streams"
+dynamic = ["version"]
+description = "Async stream processing on Redis Streams: decorator-based agents, timers and shared state"
 readme = "README.md"
-license = {text = "Apache-2.0"}
-requires-python = ">=3.8"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
 authors = [
-    {name = "StreamMachine Team"}
+    {name = "trbck", email = "btorbicki@gmail.com"},
 ]
-keywords = ["streaming", "redis", "async", "event-driven", "data-processing"]
+keywords = ["streaming", "redis", "redis-streams", "async", "asyncio", "event-driven", "data-processing"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: Apache Software License",
-    "Operating System :: OS Independent",
+    "Operating System :: POSIX",
+    "Operating System :: MacOS",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Framework :: AsyncIO",
     "Topic :: System :: Distributed Computing",
+    "Typing :: Typed",
 ]
 
 dependencies = [
-    "coredis>=4.0.0",
-    "uvloop>=0.17.0",
-    "venusian>=3.0.0",
-    "pandas>=1.5.0",
-    "numpy>=1.23.0",
-    "redis>=4.5.0",
+    "coredis>=4.22,<7",
+    "venusian>=3.0",
+    "pandas>=1.5",
+    "uvloop>=0.17; sys_platform != 'win32'",
 ]
 
 [project.optional-dependencies]
+mcp = ["mcp>=1.0,<2"]
+dashboard = ["fastapi>=0.100", "uvicorn>=0.23"]
+objstorage = ["redis>=4.5"]
+cython = ["cython>=3.0"]
+all = ["streammachine[mcp,dashboard,objstorage]"]
 dev = [
-    "pytest>=7.0.0",
-    "pytest-asyncio>=0.21.0",
-    "pytest-cov>=4.0.0",
-    "black>=23.0.0",
-    "mypy>=1.0.0",
-    "ruff>=0.0.260",
-    "pre-commit>=3.0.0",
-]
-cython = [
-    "cython>=3.0.0",
-]
-fast-json = [
-    "ujson>=5.0.0",
-    "orjson>=3.9.0",
-]
-monitoring = [
-    "structlog>=23.0.0",
-    "prometheus-client>=0.17.0",
-]
-mcp = [
-    "mcp>=1.0.0",
-]
-dashboard = [
-    "fastapi>=0.100.0",
-    "uvicorn>=0.23.0",
-]
-all = [
-    "streammachine[dev,cython,fast-json,monitoring,mcp,dashboard]",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=4.0",
+    "pytest-benchmark>=4.0",
+    "pytest-timeout>=2.2",
+    "ruff>=0.4",
+    "mypy>=1.8",
+    "build>=1.0",
+    "twine>=5.0",
 ]
 
 [project.scripts]
 streammachine-mcp = "streammachine.mcp_entry:main"
 
 [project.urls]
-Homepage = "https://github.com/anthropics/streammachine"
-Documentation = "https://github.com/anthropics/streammachine#readme"
-Repository = "https://github.com/anthropics/streammachine"
-Issues = "https://github.com/anthropics/streammachine/issues"
+Homepage = "https://github.com/trbck/streammachine"
+Documentation = "https://github.com/trbck/streammachine/tree/master/docs"
+Repository = "https://github.com/trbck/streammachine"
+Issues = "https://github.com/trbck/streammachine/issues"
+Changelog = "https://github.com/trbck/streammachine/blob/master/CHANGELOG.md"
 
-[build-system]
-requires = ["setuptools>=61.0", "wheel"]
-build-backend = "setuptools.build_meta"
+[tool.setuptools.dynamic]
+version = {attr = "streammachine.__version__"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["streammachine*"]
-exclude = ["tests*", "docs*"]
 
 [tool.setuptools.package-data]
 streammachine = ["py.typed"]
-
-[tool.black]
-line-length = 100
-target-version = ["py38", "py39", "py310", "py311", "py312"]
-include = '\.pyi?$'
-exclude = '''
-/(
-    \.eggs
-  | \.git
-  | \.hg
-  | \.mypy_cache
-  | \.tox
-  | \.venv
-  | _build
-  | buck-out
-  | build
-  | dist
-)/
-'''
+"streammachine.cython" = ["*.pyx"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py38"
-select = [
-    "E",   # pycodestyle errors
-    "W",   # pycodestyle warnings
-    "F",   # Pyflakes
-    "I",   # isort
-    "B",   # flake8-bugbear
-    "C4",  # flake8-comprehensions
-    "UP",  # pyupgrade
-]
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "B", "C4"]
 ignore = [
-    "E501",  # line too long (handled by black)
+    "E501",  # line too long
     "B008",  # function call in default argument
+    "E402",  # module level import not at top (optional imports after __version__)
 ]
 
 [tool.mypy]
-python_version = "3.8"
-warn_return_any = true
-warn_unused_ignores = true
-disallow_untyped_defs = true
-disallow_incomplete_defs = true
-check_untyped_defs = true
-strict_optional = true
-warn_redundant_casts = true
-warn_unused_configs = true
-
-[[tool.mypy.overrides]]
-module = [
-    "coredis.*",
-    "venusian.*",
-    "uvloop.*",
-    "pandas.*",
-    "numpy.*",
-    "mcp.*",
-]
+python_version = "3.10"
 ignore_missing_imports = true
+check_untyped_defs = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 python_files = ["test_*.py"]
-python_functions = ["test_*"]
-addopts = "-v --tb=short"
+addopts = "-q --tb=short --timeout=120"
 markers = [
     "slow: marks tests as slow",
     "integration: marks tests requiring Redis server",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning:coredis.*",
 ]
 
 [tool.coverage.run]
 source = ["streammachine"]
 branch = true
-omit = ["tests/*", "*/__pycache__/*"]
 
 [tool.coverage.report]
 exclude_lines = [
     "pragma: no cover",
-    "def __repr__",
-    "raise AssertionError",
-    "raise NotImplementedError",
-    "if __name__ == .__main__.:",
     "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
 ]

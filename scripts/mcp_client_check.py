@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Test client for StreamMachine MCP Server.
+Manual smoke test for the StreamMachine MCP server.
 
-This script tests the MCP server by calling handlers directly
-and validating the responses.
+Not collected by pytest: it needs a live Redis and exercises the real
+handlers end to end. Run it by hand after changing the MCP server.
 
 Usage:
-    python tests/test_mcp_client.py
+    python scripts/mcp_client_check.py
 
 Prerequisites:
     - Redis running locally (or set REDIS_URL env var)

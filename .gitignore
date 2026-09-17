@@ -110,3 +110,6 @@ venv.bak/
 performance
 performance/*
 
+# Generated Cython C sources (built from the .pyx files at install time)
+src/streammachine/cython/*.c
+.ruff_cache/

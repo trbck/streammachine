@@ -67,6 +67,11 @@ Environment Variables:
 
 __version__ = "0.1.0"
 
+import logging as _logging
+
+# Library convention: never configure logging for the host application.
+_logging.getLogger(__name__).addHandler(_logging.NullHandler())
+
 from .app import App, StreamConsumer
 from .models import (
     Message,
@@ -133,10 +138,11 @@ except ImportError:
     parse_stream_entries = None  # type: ignore
     _has_fast_consumer = False
 
-# MCP server (optional, requires 'mcp' extra)
+# MCP server (optional, requires 'mcp' extra). Any failure here, including an
+# incompatible mcp SDK version, must not break importing the core package.
 try:
     from .mcp_server import server as mcp_server, run_server as mcp_run_server, main as mcp_main
-except ImportError:
+except Exception:
     mcp_server = None  # type: ignore
     mcp_run_server = None  # type: ignore
     mcp_main = None  # type: ignore
@@ -156,7 +162,7 @@ try:
         create_app,
         get_dashboard_html,
     )
-except ImportError:
+except Exception:
     DashboardManager = None  # type: ignore
     start_dashboard = None  # type: ignore
     stop_dashboard = None  # type: ignore

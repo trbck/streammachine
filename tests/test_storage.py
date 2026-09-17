@@ -1,7 +1,6 @@
 """
 Tests for streammachine.storage module.
 """
-import asyncio
 from unittest.mock import Mock
 
 import pytest

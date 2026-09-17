@@ -30,25 +30,29 @@ Match pool size to concurrency:
 total_concurrency = sum(agent.concurrency for agent in agents)
 pool_size = total_concurrency + len(timers) + 10  # overhead
 
-app = App(redis_max_connections=pool_size)
+# Pool size is per RedisConnection, configured via the environment:
+# REDIS_MAX_CONNECTIONS=<pool_size>
 ```
 
-### Using Multiprocess
+### CPU-bound work
 
-For CPU-bound work, use `processes=N`:
+Handlers run on one event loop, so CPU-heavy code blocks every other agent
+and timer in the process. Offload it to the App's process pool:
 
 ```python
-@app.agent("stream", group="workers", processes=4)
+import asyncio
+
+@app.agent("stream", group="workers")
 async def cpu_intensive_worker(record: Message):
-    # This runs in a separate process
-    result = heavy_computation(record.message)
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(app.process_pool, heavy_computation, record.message)
     await app.send("output", result)
 ```
 
-Each process has:
-- Its own event loop
-- Its own Redis connection
-- Shared Storage via `multiprocessing.Manager`
+`processes=N` on `@app.agent` is accepted for forward compatibility, but the
+agent currently still runs in the main process and a warning is logged. To use
+more than one CPU for the same stream today, start additional copies of the
+script in the same consumer group (see below).
 
 ## Horizontal Scaling
 

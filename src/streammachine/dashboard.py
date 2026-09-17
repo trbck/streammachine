@@ -471,7 +471,6 @@ class DashboardManager:
 
 def create_app() -> FastAPI:
     """Create FastAPI application with dashboard routes."""
-    from contextlib import asynccontextmanager
     from .redisapi import RedisConnection
 
     # Shared Redis connection for the app lifespan
@@ -490,10 +489,12 @@ def create_app() -> FastAPI:
                 await _shared_redis.close()
                 _shared_redis = None
 
+    from . import __version__
+
     app = FastAPI(
         title="StreamMachine Dashboard",
         description="Monitor StreamMachine tasks across multiple instances",
-        version="0.1.0",
+        version=__version__,
         lifespan=lifespan
     )
 
@@ -548,40 +549,33 @@ def create_app() -> FastAPI:
 
 # API endpoint implementations - All use Redis directly for cross-process visibility
 
+async def _scan_keys(client, pattern: str) -> List[Any]:
+    """Collect every key matching ``pattern`` using SCAN (never KEYS)."""
+    keys: List[Any] = []
+    cursor: Any = 0
+    while True:
+        result = await client.scan(cursor, match=pattern, count=100)
+        cursor = result[0] if isinstance(result, tuple) else result.cursor
+        keys.extend(result[1] if isinstance(result, tuple) else result.keys)
+        if not cursor or cursor in (0, b"0", "0"):
+            return keys
+
+
 async def _get_all_instances_from_redis(client) -> List[Dict[str, Any]]:
     """Get all registered instances from Redis using SCAN."""
     instances = []
 
-    # Use SCAN to find all instance keys
-    cursor = 0
-    while True:
-        if _HAS_COREDIS:
-            result = await client.scan(cursor, match=f"{INSTANCES_KEY_PREFIX}*", count=100)
-        else:
-            result = await client.scan(cursor, match=f"{INSTANCES_KEY_PREFIX}*", count=100)
-
-        cursor = result[0] if isinstance(result, tuple) else result.cursor
-        keys = result[1] if isinstance(result, tuple) else result.keys
-
-        for key in keys:
-            try:
-                data = await client.get(key)
-                if data:
-                    # Decode if bytes
-                    if isinstance(data, bytes):
-                        data = data.decode('utf-8')
-                    # Parse JSON
-                    instances.append(json.loads(data))
-            except Exception as e:
-                logger.warning(f"Error reading instance {key}: {e}")
-
-        # Check if scan is complete
-        if _HAS_COREDIS:
-            if cursor == 0:
-                break
-        else:
-            if not cursor or cursor == b'0':
-                break
+    for key in await _scan_keys(client, f"{INSTANCES_KEY_PREFIX}*"):
+        try:
+            data = await client.get(key)
+            if data:
+                # Decode if bytes
+                if isinstance(data, bytes):
+                    data = data.decode('utf-8')
+                # Parse JSON
+                instances.append(json.loads(data))
+        except Exception as e:
+            logger.warning(f"Error reading instance {key}: {e}")
 
     return instances
 
@@ -724,38 +718,20 @@ async def get_all_timers(client) -> List[Dict[str, Any]]:
 
 async def get_storage_contents(client) -> Dict[str, Any]:
     """Get storage contents (keys only for safety)."""
-    # Use SCAN to find all streammachine keys
-    keys = []
-    cursor = 0
-    while True:
-        if _HAS_COREDIS:
-            result = await client.scan(cursor, match="streammachine:*", count=100)
-        else:
-            result = await client.scan(cursor, match="streammachine:*", count=100)
-
-        cursor = result[0] if isinstance(result, tuple) else result.cursor
-        scan_keys = result[1] if isinstance(result, tuple) else result.keys
-        keys.extend(scan_keys)
-
-        if _HAS_COREDIS:
-            if cursor == 0:
-                break
-        else:
-            if not cursor or cursor == b'0':
-                break
+    keys = await _scan_keys(client, "streammachine:*")
 
     # Decode keys and fetch values
     result = {}
     for key in keys[:100]:  # Limit to 100 keys
+        key_str = key.decode('utf-8') if isinstance(key, bytes) else key
         try:
-            key_str = key.decode('utf-8') if isinstance(key, bytes) else key
             data = await client.get(key)
             if data:
                 if isinstance(data, bytes):
                     data = data.decode('utf-8')
                 result[key_str] = data
         except Exception as e:
-            result[key_str if 'key_str' in dir() else key] = f"Error reading: {e}"
+            result[key_str] = f"Error reading: {e}"
 
     return {
         "total_keys": len(keys),

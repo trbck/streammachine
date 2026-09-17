@@ -25,7 +25,8 @@ import asyncio
 import json
 import logging
 import os
-from typing import Any, Optional
+import sys
+from typing import Any, Dict, Optional
 
 # MCP SDK imports
 from mcp.server import Server
@@ -53,11 +54,6 @@ except ImportError:
     _HAS_FAST_OHLC_CYTHON = False
     _HAS_OHLC = False
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
 logger = logging.getLogger("streammachine.mcp")
 
 # Create MCP server instance
@@ -959,6 +955,12 @@ async def run_server():
 
 def main():
     """Entry point for the MCP server."""
+    # stdout is the MCP transport, so diagnostics must go to stderr.
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        stream=sys.stderr,
+    )
     asyncio.run(run_server())
 
 

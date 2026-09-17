@@ -5,7 +5,6 @@ Tests both Cython and Python implementations.
 """
 import pytest
 import time
-from typing import List
 
 # Import with fallback handling
 try:
@@ -210,7 +209,6 @@ class TestFastOHLCPython:
 
         # Add a tick in the current minute (not completed)
         current_ts = int(time.time() * 1000)
-        current_minute_start = (current_ts // 60000) * 60000
         agg.update_tick(b"AAPL", 105.0, 100.0, current_ts)
 
         # Get completed candles (using a timestamp after the first candle)

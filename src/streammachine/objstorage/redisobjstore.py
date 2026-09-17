@@ -47,12 +47,12 @@ Example:
         # Clean up
         await storage.delete_keys('model:*')
 """
-import redis.asyncio as redis
+import logging
 import pickle
 import time
-import asyncio
-import logging
 from typing import Any, List, Optional
+
+import redis.asyncio as redis
 
 
 class RedisObjectStorage:
@@ -87,7 +87,7 @@ class RedisObjectStorage:
         """
         self.redis_client = redis.Redis(host=redis_host, port=redis_port, db=redis_db)
         self.logger = logging.getLogger(__name__)
-        logging.basicConfig(level=log_level)
+        self.logger.setLevel(log_level)
 
     async def store_with_pickle(self, key: str, obj: Any) -> float:
         """

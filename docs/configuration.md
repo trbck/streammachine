@@ -32,25 +32,27 @@ STREAMMACHINE_COUNT=10
 
 ## Application Configuration
 
-### AppConfig
+### App parameters
 
 ```python
-from streammachine.models import AppConfig
+from streammachine import App
 
-config = AppConfig(
-    name="my_app",           # Application name
-    to_scan=True,            # Scan for decorated tasks
-    max_processes=5,         # Process pool workers
-    max_threads=5,           # Thread pool workers
-    webserver_port=8000,     # Web server port (future)
-    webserver_host="localhost",
-    debug=False,
-    redis_url="redis://localhost:6379/0",
-    redis_max_connections=50,
+app = App(
+    name="my_app",                 # Application name (logging, dashboard)
+    to_scan=True,                  # Scan the calling module for decorated tasks
+    max_processes=5,               # Size of app.process_pool
+    max_threads=5,                 # Size of app.thread_pool
+    dashboard_enabled=True,        # Serve the monitoring dashboard (needs [dashboard])
+    dashboard_port=8000,
+    dashboard_host="localhost",
+    dashboard_refresh_interval=5,  # Heartbeat interval in seconds
+    stream_maxlen=100_000,         # Approximate MAXLEN for produced streams (None = unbounded)
 )
-
-app = App(**config.__dict__)
 ```
+
+Redis connection settings are not App parameters; set them through the
+environment variables above before creating the App. The validated
+`AppConfig` dataclass behind these parameters is available as `app.config`.
 
 ### ConsumerConfig
 

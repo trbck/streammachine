@@ -10,8 +10,10 @@ Key Design Decisions:
   declarative API where @app.agent and @app.timer just work.
 - uvloop for event loop: Provides 2-4x faster event loop performance vs asyncio
   default, critical for high-throughput stream processing.
-- ProcessPoolExecutor for CPU-bound work: When `processes=N` is specified, the
-  agent runs in separate processes to bypass Python's GIL for true parallelism.
+- Process/thread pools: App exposes `process_pool` and `thread_pool`
+  executors for offloading CPU-bound or blocking work from handlers.
+  Note: `processes=N` on @app.agent is accepted but agents currently run
+  in the main process (multiprocess agents are not implemented yet).
 - Graceful shutdown: Signal handlers (SIGINT/SIGTERM) trigger cleanup sequence
   that waits for in-flight messages before terminating.
 
@@ -48,7 +50,6 @@ import signal
 import socket
 import uuid
 import time
-import uvloop
 import inspect
 import venusian
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
@@ -68,16 +69,20 @@ from .models import (
 from .redisapi import RedisConnection
 from . import storage
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s,%(msecs)d %(levelname)s [%(name)s]: %(message)s",
-    datefmt="%H:%M:%S",
-)
 logger = logging.getLogger(__name__)
 
-# Set uvloop as the default event loop policy
-asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+# uvloop is a large speed-up on Linux/macOS but is not available on Windows.
+try:
+    import uvloop
+except ImportError:  # pragma: no cover - platform dependent
+    uvloop = None
+
+
+def _new_event_loop() -> asyncio.AbstractEventLoop:
+    """Create the fastest event loop available (uvloop if installed)."""
+    if uvloop is not None:
+        return uvloop.new_event_loop()
+    return asyncio.new_event_loop()
 
 
 class App:
@@ -99,9 +104,10 @@ class App:
         among consumers in the same group. This enables horizontal scaling.
 
     Multiprocessing:
-        For CPU-bound agents, use processes=N to spawn N worker processes.
-        Each process has its own event loop and Redis connection. Use Storage
-        for cross-process state sharing via multiprocessing.Manager.
+        ``processes=N`` on an agent is accepted for forward compatibility but
+        the agent still runs in the main process (a warning is logged). For
+        CPU-bound work, offload to ``app.process_pool`` from the handler or
+        run several App instances in the same consumer group.
 
     Thread Safety:
         - Storage uses multiprocessing.Manager for cross-process state
@@ -130,11 +136,14 @@ class App:
             if __name__ == "__main__":
                 app.start()
 
-        Multiprocess agent for CPU-bound work::
+        Offload CPU-bound work to the process pool::
 
-            @app.agent("data", processes=4)  # 4 worker processes
+            @app.agent("data")
             async def heavy_processing(record: Message):
-                result = cpu_intensive_work(record.message)
+                loop = asyncio.get_running_loop()
+                result = await loop.run_in_executor(
+                    app.process_pool, cpu_intensive_work, record.message
+                )
                 await app.send("results", result)
 
     Args:
@@ -242,17 +251,26 @@ class App:
         """
         Get list of agent coroutines to run within the main process.
 
-        Returns agents that don't use multiprocessing (processes=None).
-        These agents run as asyncio tasks in the main process's event loop.
-
         For each agent, we create N coroutine instances where N is the
         concurrency parameter, allowing parallel message processing within
         the same process.
+
+        Agents declared with ``processes=N`` are included too: multiprocess
+        execution is not implemented yet, so they run in-process and a
+        warning is logged instead of silently never starting.
         """
+        agents = [
+            item for item in self.registry.registered if item.decorator_type == "agent"
+        ]
+        for item in agents:
+            if item.processes is not None:
+                logger.warning(
+                    f"Agent {item.obj_name} requested processes={item.processes}; "
+                    "multiprocess agents are not supported yet, running in-process"
+                )
         return [
             agent_container(item)
-            for item in self.registry.registered
-            if item.decorator_type == "agent" and item.processes is None
+            for item in agents
             for _ in range(item.concurrency)
         ]
 
@@ -262,27 +280,6 @@ class App:
             timer_container(item, self._shutdown_event)
             for item in self.registry.registered
             if item.decorator_type == "timer"
-        ]
-
-    def _get_multiprocesses_concurrent_agents(self) -> List[Any]:
-        """
-        Get list of agents configured for multiprocess execution.
-
-        These agents use processes=N to spawn separate processes for
-        CPU-bound work. Each process gets its own event loop and
-        Redis connection, bypassing the GIL for true parallelism.
-
-        Note: Communication between processes is via Storage (which uses
-        multiprocessing.Manager) or Redis streams.
-
-        Returns:
-            List of ConsumerConfig items with processes != None
-        """
-        return [
-            item
-            for item in self.registry.registered
-            if item.decorator_type == "agent" and item.processes is not None
-            for _ in range(item.concurrency)
         ]
 
     def _setup_signal_handlers(self) -> None:
@@ -499,8 +496,8 @@ class App:
         agents = self._get_concurrent_agents()
         timers = self._get_timers()
 
-        asyncio.set_event_loop(uvloop.new_event_loop())
-        self.loop = asyncio.get_event_loop()
+        self.loop = _new_event_loop()
+        asyncio.set_event_loop(self.loop)
 
         # Set up signal handlers
         self._setup_signal_handlers()
@@ -567,22 +564,23 @@ class App:
 
         Args:
             topic: Stream name
-            record: Record data as a dictionary
+            record: Record data as a dictionary (not mutated; a ``sent``
+                timestamp is added to a copy)
 
         Returns:
             Message ID from Redis
         """
-        t = time.time()
-        record["sent"] = t
+        payload = {**record, "sent": time.time()}
+        await self.rc._ensure_pool()
         if self.stream_maxlen:
             return await self.rc.client.xadd(
                 topic,
-                record,
+                payload,
                 trim_strategy=PureToken.MAXLEN,
                 trim_operator=PureToken.APPROXIMATELY,
                 threshold=self.stream_maxlen,
             )
-        return await self.rc.client.xadd(topic, record)
+        return await self.rc.client.xadd(topic, payload)
 
     async def send_batch(self, topic: str, records: List[dict]) -> List:
         """
@@ -596,9 +594,8 @@ class App:
             List of message IDs from Redis
         """
         t = time.time()
-        for record in records:
-            record["sent"] = t
-        return await self.rc.pipeline_xadd(topic, records, maxlen=self.stream_maxlen)
+        payloads = [{**record, "sent": t} for record in records]
+        return await self.rc.pipeline_xadd(topic, payloads, maxlen=self.stream_maxlen)
 
     async def shutdown(self) -> None:
         """
@@ -968,9 +965,3 @@ __all__ = [
     "timer_container",
     "maintenance_task",
 ]
-
-
-if __name__ == "__main__":
-    # This module is not meant to be run directly.
-    # Use example.py or create your own entry point.
-    print("Run 'python example.py' to start the application.")

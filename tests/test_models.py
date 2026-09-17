@@ -3,7 +3,6 @@ Tests for streammachine.models module.
 """
 import pytest
 import pandas as pd
-from dataclasses import asdict
 
 from streammachine.models import (
     Message,
@@ -638,7 +637,6 @@ class TestTimeSeriesBuffer:
         Regression test: When stream goes idle, get() should still prune
         old data to maintain the sliding window contract.
         """
-        import time
         import pandas as pd
         from unittest.mock import patch
 

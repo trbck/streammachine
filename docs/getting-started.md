@@ -11,7 +11,7 @@ pip install streammachine
 For development:
 
 ```bash
-git clone https://github.com/your-repo/streammachine.git
+git clone https://github.com/trbck/streammachine.git
 cd streammachine
 pip install -e ".[dev]"
 ```

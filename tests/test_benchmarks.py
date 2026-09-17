@@ -210,7 +210,7 @@ class TestTimeSeriesBufferBenchmark:
         times = []
         for _ in range(100):
             start = time.perf_counter()
-            result = buffer.get()
+            buffer.get()
             times.append(time.perf_counter() - start)
 
         avg_time = sum(times) / len(times)
@@ -264,7 +264,7 @@ class TestDecodeBenchmark:
 
         def decode_pure_python():
             results = []
-            for msg_id, fields in messages:
+            for _msg_id, fields in messages:
                 decoded = {k.decode("utf-8"): v.decode("utf-8") for k, v in fields.items()}
                 results.append(decoded)
             return results
@@ -286,13 +286,13 @@ class TestDecodeBenchmark:
         # Measure with streams_to_dataframe (uses decode internally)
         start = time.perf_counter()
         for _ in range(10):
-            df = streams_to_dataframe(stream_output)
+            streams_to_dataframe(stream_output)
         regular_time = time.perf_counter() - start
 
         # Measure with fast version
         start = time.perf_counter()
         for _ in range(10):
-            df = streams_to_dataframe_fast(stream_output)
+            streams_to_dataframe_fast(stream_output)
         fast_time = time.perf_counter() - start
 
         print(f"\nRegular: {regular_time:.4f}s, Fast: {fast_time:.4f}s")
@@ -337,7 +337,6 @@ class TestMemoryBenchmark:
     @pytest.mark.parametrize("num_rows", [10000, 100000])
     def test_buffer_memory_usage(self, num_rows):
         """Test memory usage of TimeSeriesBuffer."""
-        import sys
 
         buffer = TimeSeriesBuffer(max_age_seconds=3600)
 

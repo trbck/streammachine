@@ -10,7 +10,6 @@ These tests verify graceful error handling for:
 """
 import asyncio
 from unittest.mock import MagicMock, AsyncMock, patch
-import uuid
 
 import pytest
 
@@ -73,8 +72,10 @@ class TestRedisConnectionFailures:
         with patch('streammachine.redisapi.coredis.Redis') as mock_redis:
             mock_client = MagicMock()
             mock_pipeline = MagicMock()
-            mock_pipeline.xadd = AsyncMock(side_effect=Exception("Pipeline error"))
-            mock_client.pipeline = AsyncMock(return_value=mock_pipeline)
+            mock_pipeline.xadd = MagicMock(side_effect=Exception("Pipeline error"))
+            mock_client.pipeline = MagicMock(return_value=mock_pipeline)
+            mock_client.connection_pool.__aenter__ = AsyncMock(return_value=None)
+            mock_client.connection_pool.__aexit__ = AsyncMock(return_value=None)
             mock_redis.return_value = mock_client
 
             conn = RedisConnection()
@@ -117,7 +118,7 @@ class TestMessageDeserializationErrors:
         # Accessing timer will fail, but that's expected behavior
         # The timer property handles this gracefully
         try:
-            timer_str = msg.timer
+            _ = msg.timer
             # If sent is string, it might work or fail
         except (TypeError, ValueError):
             pass  # Expected - invalid sent value
@@ -276,7 +277,6 @@ class TestGracefulShutdown:
         """Test shutdown waits for tasks with timeout."""
         app = App(name="test_app", to_scan=False)
 
-        shutdown_started = False
         cleanup_complete = False
 
         async def slow_cleanup():
@@ -287,7 +287,7 @@ class TestGracefulShutdown:
             except asyncio.CancelledError:
                 cleanup_complete = True
 
-        task = asyncio.create_task(slow_cleanup())
+        asyncio.create_task(slow_cleanup())
 
         # Shutdown with 10 second timeout
         await app.shutdown()
@@ -421,7 +421,6 @@ class TestErrorInHandlers:
         from unittest.mock import MagicMock
 
         handler_calls = []
-        exceptions = []
 
         async def failing_handler(msg):
             handler_calls.append(msg)
@@ -438,7 +437,7 @@ class TestErrorInHandlers:
             mod=mock_module,
         )
 
-        consumer = StreamConsumer(config)
+        StreamConsumer(config)
 
         # The consumer should catch exceptions and continue
         # We verify the config was created correctly
