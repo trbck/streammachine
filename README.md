@@ -72,14 +72,14 @@ Run several copies of the same script to scale horizontally; Redis distributes e
 
 ## Documentation
 
-- [Getting started](docs/getting-started.md)
-- [Configuration](docs/configuration.md)
-- [Architecture](docs/architecture.md)
-- [Scaling](docs/scaling.md)
-- [Best practices](docs/best-practices.md)
-- [Testing](docs/testing.md)
-- [Examples](examples/README.md)
-- [LLM_API.md](LLM_API.md): condensed API reference intended for pasting into an LLM context
+- [Getting started](https://github.com/trbck/streammachine/blob/master/docs/getting-started.md)
+- [Configuration](https://github.com/trbck/streammachine/blob/master/docs/configuration.md)
+- [Architecture](https://github.com/trbck/streammachine/blob/master/docs/architecture.md)
+- [Scaling](https://github.com/trbck/streammachine/blob/master/docs/scaling.md)
+- [Best practices](https://github.com/trbck/streammachine/blob/master/docs/best-practices.md)
+- [Testing](https://github.com/trbck/streammachine/blob/master/docs/testing.md)
+- [Examples](https://github.com/trbck/streammachine/blob/master/examples/README.md)
+- [LLM_API.md](https://github.com/trbck/streammachine/blob/master/LLM_API.md): condensed API reference intended for pasting into an LLM context
 
 ## Development
 
@@ -102,4 +102,4 @@ twine check dist/*
 
 ## License
 
-Apache License 2.0. See [LICENSE](LICENSE).
+Apache License 2.0. See [LICENSE](https://github.com/trbck/streammachine/blob/master/LICENSE).
